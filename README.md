@@ -1,6 +1,6 @@
-# 🏸 BadmintonKu - Aplikasi Booking Lapangan Badminton
+# 🏟️ SportBook - Aplikasi Booking Lapangan Olahraga
 
-Aplikasi full-stack untuk booking lapangan badminton online dengan payment gateway,
+Aplikasi full-stack untuk booking lapangan olahraga (badminton, futsal, basket, padel) online dengan payment gateway,
 sistem approval admin, dan login via email/password atau Google.
 
 ## Struktur Folder
@@ -16,7 +16,8 @@ badminton-booking/
 ### User
 
 - Daftar & login (email/password) atau login dengan Google (OAuth 2.0)
-- Melihat daftar lapangan beserta harga, fasilitas, dan lokasi
+- Melihat daftar lapangan olahraga beserta harga, fasilitas, dan lokasi
+- Filter berdasarkan jenis olahraga (badminton, futsal, basket, padel)
 - Memilih tanggal & jam booking (slot per jam), otomatis menampilkan jam yang
   sudah terisi (tidak bisa dipilih lagi)
 - Pembayaran online via **Midtrans Snap** (kartu kredit, e-wallet, VA, dsb)
@@ -28,8 +29,8 @@ badminton-booking/
 ### Admin
 
 - Dashboard statistik (jumlah lapangan, user, booking, pendapatan, dll)
-- Kelola lapangan: tambah, edit, nonaktifkan, hapus lapangan, atur harga,
-  fasilitas, dan jam operasional
+- Kelola lapangan: tambah, edit, nonaktifkan, hapus lapangan, atur jenis olahraga,
+  harga, fasilitas, dan jam operasional
 - Kelola booking: approve booking yang sudah dibayar, tolak, atau batalkan
   booking kapan saja
 - Kelola pengguna: lihat semua user, ubah role (user/admin), blokir/aktifkan
@@ -75,7 +76,7 @@ node seed.js
 
 Ini akan membuat akun admin:
 
-- Email: `admin@badminton.com`
+- Email: `admin@sportbook.com`
 - Password: `admin123`
 
 **Segera ganti password ini setelah login pertama kali** (lewat MongoDB langsung
@@ -173,14 +174,14 @@ Untuk mode production, ganti juga URL script menjadi:
 mongod
 ```
 
-Gunakan `MONGO_URI=mongodb://127.0.0.1:27017/badminton_booking`
+Gunakan `MONGO_URI=mongodb://127.0.0.1:27017/sportbook`
 
 **Opsi B - MongoDB Atlas (cloud, gratis):**
 
 1. Buat cluster gratis di https://www.mongodb.com/cloud/atlas
 2. Buat database user & whitelist IP (atau izinkan semua IP untuk testing: `0.0.0.0/0`)
 3. Copy connection string ke `MONGO_URI`, contoh:
-   `mongodb+srv://user:password@cluster0.xxxxx.mongodb.net/badminton_booking`
+   `mongodb+srv://user:password@cluster0.xxxxx.mongodb.net/sportbook`
 
 ---
 

@@ -32,7 +32,7 @@ const Login = () => {
   return (
     <div className="auth-shell">
       <div className="auth-card">
-        <h2>Masuk ke BadmintonKu</h2>
+        <h2>Masuk ke SportBook</h2>
         <p className="auth-sub">Lanjutkan booking lapangan yang tertunda atau cari jadwal baru.</p>
 
         {googleFailed && (

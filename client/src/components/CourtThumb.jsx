@@ -1,9 +1,15 @@
-const CourtThumb = ({ image, alt, height, children }) => {
+const apiUrl = import.meta.env.VITE_API_URL?.replace("/api", "") || "http://localhost:5001";
+
+const resolveSrc = (img) => (img.startsWith("http") ? img : `${apiUrl}${img}`);
+
+const CourtThumb = ({ image, images, alt, height, children }) => {
+  const src = (image ? resolveSrc(image) : (images && images.length > 0 ? resolveSrc(images[0]) : null));
+
   return (
     <div className="court-thumb" style={height ? { height } : undefined}>
       {children}
-      {image ? (
-        <img src={image} alt={alt} loading="lazy" />
+      {src ? (
+        <img src={src} alt={alt} loading="lazy" />
       ) : (
         <svg
           className="court-thumb-mark"

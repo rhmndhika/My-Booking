@@ -24,6 +24,27 @@ const HeroCourtLines = () => (
   </svg>
 );
 
+const SPORT_TYPE_LABELS = {
+  badminton: "Badminton",
+  futsal: "Futsal",
+  basketball: "Basket",
+  padel: "Padel",
+};
+
+const SPORT_TYPE_ICONS = {
+  badminton: "🏸",
+  futsal: "⚽",
+  basketball: "🏀",
+  padel: "🎾",
+};
+
+const SPORT_TYPE_COLORS = {
+  badminton: "#2c7a4b",
+  futsal: "#1769aa",
+  basketball: "#c9520a",
+  padel: "#7c3aed",
+};
+
 const FloatingCard = ({ title, price, meta, className }) => (
   <div className={`hero-visual-card ${className}`}>
     <h4>{title}</h4>
@@ -37,6 +58,7 @@ const Home = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("default");
+  const [sportFilter, setSportFilter] = useState("all");
 
   useEffect(() => {
     const load = async () => {
@@ -55,13 +77,14 @@ const Home = () => {
   const filtered = useMemo(() => {
     let list = courts.filter((c) => {
       const q = search.trim().toLowerCase();
-      if (!q) return true;
-      return c.name.toLowerCase().includes(q) || c.location.toLowerCase().includes(q);
+      if (q && !c.name.toLowerCase().includes(q) && !c.location.toLowerCase().includes(q)) return false;
+      if (sportFilter !== "all" && c.sportType !== sportFilter) return false;
+      return true;
     });
     if (sortBy === "price-asc") list = [...list].sort((a, b) => a.pricePerHour - b.pricePerHour);
     if (sortBy === "price-desc") list = [...list].sort((a, b) => b.pricePerHour - a.pricePerHour);
     return list;
-  }, [courts, search, sortBy]);
+  }, [courts, search, sortBy, sportFilter]);
 
   const handleSearch = (e) => {
     e.preventDefault();
@@ -85,14 +108,14 @@ const Home = () => {
           <div className="hero-content">
             <div className="hero-badge">
               <span className="hero-badge-dot" />
-              Booking lapangan real-time
+              Booking lapangan olahraga real-time
             </div>
 
             <h1>
-              Main bareng makin <span className="text-gold">gampang.</span>
+              Sewa lapangan <span className="text-gold">gampang.</span>
             </h1>
             <p className="lede">
-              Lihat jam kosong langsung dari sistem venue, pilih slot, bayar online.
+              Badminton, futsal, basket, padel — pilih lapangan, booking slot, bayar online.
               Nggak perlu telepon admin lagi.
             </p>
 
@@ -128,19 +151,39 @@ const Home = () => {
           </div>
 
           <div className="hero-visual">
-            <span className="hero-visual-shuttle">🏸</span>
-            <FloatingCard
-              title="GOR Sejahtera"
-              price={formatIDR(75000)}
-              meta="Lapangan A · Buka sekarang"
-              className="hero-visual-card-1"
-            />
-            <FloatingCard
-              title="Graha Badminton"
-              price={formatIDR(60000)}
-              meta="Lapangan C · 3 slot kosong"
-              className="hero-visual-card-2"
-            />
+            <span className="hero-visual-shuttle">🏟️</span>
+            {courts.length > 0 && (
+              <FloatingCard
+                title={courts[0].name}
+                price={formatIDR(courts[0].pricePerHour)}
+                meta={`${SPORT_TYPE_LABELS[courts[0].sportType]} · Buka sekarang`}
+                className="hero-visual-card-1"
+              />
+            )}
+            {courts.length > 1 && (
+              <FloatingCard
+                title={courts[1].name}
+                price={formatIDR(courts[1].pricePerHour)}
+                meta={`${SPORT_TYPE_LABELS[courts[1].sportType]} · ${courts[1].location?.split(",")[0] || "Tersedia"}`}
+                className="hero-visual-card-2"
+              />
+            )}
+            {courts.length === 0 && !loading && (
+              <>
+                <FloatingCard
+                  title="SportBook"
+                  price="Mulai dari Rp 50.000"
+                  meta="Booking lapangan olahraga"
+                  className="hero-visual-card-1"
+                />
+                <FloatingCard
+                  title="Tersedia"
+                  price="Badminton · Futsal · Basket · Padel"
+                  meta="Pilih lapangan favoritmu"
+                  className="hero-visual-card-2"
+                />
+              </>
+            )}
           </div>
         </div>
       </section>
@@ -152,16 +195,30 @@ const Home = () => {
             <span className="eyebrow">Venue tersedia</span>
             <h2>{filtered.length} lapangan ditemukan</h2>
           </div>
-          <Select
-            value={sortBy}
-            onChange={setSortBy}
-            style={{ width: 200 }}
-            options={[
-              { value: "default", label: "Urutan terbaru" },
-              { value: "price-asc", label: "Harga terendah" },
-              { value: "price-desc", label: "Harga tertinggi" },
-            ]}
-          />
+          <div style={{ display: "flex", gap: 12 }}>
+            <Select
+              value={sportFilter}
+              onChange={setSportFilter}
+              style={{ width: 150 }}
+              options={[
+                { value: "all", label: "Semua Olahraga" },
+                { value: "badminton", label: "🏸 Badminton" },
+                { value: "futsal", label: "⚽ Futsal" },
+                { value: "basketball", label: "🏀 Basket" },
+                { value: "padel", label: "🎾 Padel" },
+              ]}
+            />
+            <Select
+              value={sortBy}
+              onChange={setSortBy}
+              style={{ width: 200 }}
+              options={[
+                { value: "default", label: "Urutan terbaru" },
+                { value: "price-asc", label: "Harga terendah" },
+                { value: "price-desc", label: "Harga tertinggi" },
+              ]}
+            />
+          </div>
         </div>
 
         {loading ? (
@@ -188,8 +245,24 @@ const Home = () => {
             {filtered.map((court) => (
               <Link key={court._id} to={`/courts/${court._id}`} style={{ textDecoration: "none" }}>
                 <div className="court-card">
-                  <CourtThumb image={court.image} alt={court.name}>
+                  <CourtThumb image={court.image} images={court.images} alt={court.name}>
                     <span className="court-price-tag">{formatIDR(court.pricePerHour)}/jam</span>
+                    <span
+                      className="court-sport-tag"
+                      style={{
+                        background: SPORT_TYPE_COLORS[court.sportType] || "#12362b",
+                        color: "#fff",
+                        padding: "3px 10px",
+                        borderRadius: 999,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        position: "absolute",
+                        top: 12,
+                        left: 12,
+                      }}
+                    >
+                      {SPORT_TYPE_ICONS[court.sportType]} {SPORT_TYPE_LABELS[court.sportType]}
+                    </span>
                   </CourtThumb>
                   <div className="court-card-body">
                     <h3>{court.name}</h3>

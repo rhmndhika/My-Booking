@@ -33,8 +33,8 @@ const AdminLayout = () => {
             alignItems: "center",
             justifyContent: "center",
             fontSize: 16,
-          }}>🏸</span>
-          <span>BadmintonKu</span>
+          }}>🏟️</span>
+          <span>SportBook</span>
           <span style={{
             fontSize: 10,
             background: "rgba(232, 168, 50, 0.2)",
