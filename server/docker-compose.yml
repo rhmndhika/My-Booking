@@ -1,0 +1,22 @@
+services:
+  db:
+    image: mariadb:11
+    container_name: myapp-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${DB_NAME}
+      MARIADB_USER: ${DB_USER}
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mariadbdata:

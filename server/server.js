@@ -5,16 +5,13 @@ const cors = require("cors");
 const morgan = require("morgan");
 const session = require("express-session");
 const passport = require("./config/passport");
-const connectDB = require("./config/db");
-const Booking = require("./models/Booking");
+const { connectDB, run } = require("./config/db");
 
 const authRoutes = require("./routes/auth");
 const courtRoutes = require("./routes/courts");
 const bookingRoutes = require("./routes/bookings");
 const paymentRoutes = require("./routes/payment");
 const adminRoutes = require("./routes/admin");
-
-connectDB();
 
 const app = express();
 
@@ -48,20 +45,23 @@ app.get("/api/health", (req, res) => res.json({ status: "OK", time: new Date() }
 
 // Job berkala: batalkan otomatis booking yang belum dibayar melebihi batas waktu
 const EXPIRE_CHECK_INTERVAL = 60 * 1000; // cek tiap 1 menit
-setInterval(async () => {
-  try {
-    const now = new Date();
-    const result = await Booking.updateMany(
-      { status: "pending_payment", expiresAt: { $lt: now } },
-      { $set: { status: "expired", cancelledBy: "system", cancelReason: "Batas waktu pembayaran habis" } }
-    );
-    if (result.modifiedCount > 0) {
-      console.log(`[Auto-expire] ${result.modifiedCount} booking ditandai expired`);
+const startExpireJob = () => {
+  setInterval(async () => {
+    try {
+      const result = await run(
+        `UPDATE bookings
+         SET status = 'expired', cancelledBy = 'system', cancelReason = ?, updatedAt = NOW()
+         WHERE status = 'pending_payment' AND expiresAt < ?`,
+        ["Batas waktu pembayaran habis", new Date()]
+      );
+      if (result.affectedRows > 0) {
+        console.log(`[Auto-expire] ${result.affectedRows} booking ditandai expired`);
+      }
+    } catch (err) {
+      console.error("Auto-expire job error:", err.message);
     }
-  } catch (err) {
-    console.error("Auto-expire job error:", err.message);
-  }
-}, EXPIRE_CHECK_INTERVAL);
+  }, EXPIRE_CHECK_INTERVAL);
+};
 
 // Error handler global
 app.use((err, req, res, next) => {
@@ -70,4 +70,9 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Server berjalan di port ${PORT}`));
+
+// Jalankan server setelah database siap
+connectDB().then(() => {
+  startExpireJob();
+  app.listen(PORT, () => console.log(`Server berjalan di port ${PORT}`));
+});

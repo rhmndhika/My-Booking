@@ -1,11 +1,70 @@
 const express = require("express");
 const multer = require("multer");
 const path = require("path");
-const Court = require("../models/Court");
-const Booking = require("../models/Booking");
+const { query, queryOne, run } = require("../config/db");
+const { formatCourt, parseJson } = require("../utils/serialize");
+const { HttpError, sendError } = require("../utils/httpError");
 const { protect, adminOnly } = require("../middleware/auth");
 
 const router = express.Router();
+
+const ACTIVE_STATUSES = ["pending_payment", "waiting_approval", "confirmed"];
+const SPORTS = ["badminton", "futsal", "basketball", "padel"];
+
+// Hanya field ini yang boleh diisi dari request body
+const COURT_FIELDS = [
+  "name", "sportType", "location", "mapsLink", "description", "image", "images",
+  "pricePerHour", "facilities", "openHour", "closeHour", "isActive", "closedDates",
+];
+
+// Validasi + normalisasi body menjadi object { kolom: nilai } siap masuk SQL
+const buildCourtData = (body, { partial }) => {
+  const data = {};
+  for (const k of COURT_FIELDS) if (body[k] !== undefined) data[k] = body[k];
+
+  if (!partial) {
+    for (const f of ["name", "location", "pricePerHour"]) {
+      if (data[f] === undefined || data[f] === null || data[f] === "") {
+        throw new HttpError(400, `Field ${f} wajib diisi`);
+      }
+    }
+  }
+  if (data.name !== undefined) {
+    data.name = String(data.name).trim();
+    if (!data.name) throw new HttpError(400, "Nama lapangan tidak boleh kosong");
+  }
+  if (data.sportType !== undefined && !SPORTS.includes(data.sportType)) {
+    throw new HttpError(400, `sportType harus salah satu dari: ${SPORTS.join(", ")}`);
+  }
+  if (data.pricePerHour !== undefined) {
+    const p = Number(data.pricePerHour);
+    if (!Number.isFinite(p) || p < 0) throw new HttpError(400, "Harga per jam tidak valid");
+    data.pricePerHour = Math.round(p);
+  }
+  for (const k of ["openHour", "closeHour"]) {
+    if (data[k] !== undefined) {
+      const h = Number(data[k]);
+      if (!Number.isInteger(h) || h < 0 || h > 24) throw new HttpError(400, `${k} tidak valid`);
+      data[k] = h;
+    }
+  }
+  if (data.isActive !== undefined) {
+    data.isActive = data.isActive === true || data.isActive === "true" || data.isActive === 1 ? 1 : 0;
+  }
+  for (const k of ["images", "facilities", "closedDates"]) {
+    if (data[k] !== undefined) {
+      if (!Array.isArray(data[k])) throw new HttpError(400, `${k} harus berupa array`);
+      data[k] = JSON.stringify(data[k]);
+    }
+  }
+  return data;
+};
+
+const getCourt = async (id) => formatCourt(await queryOne("SELECT * FROM courts WHERE id = ?", [id]));
+
+// Update beberapa kolom sekaligus. Nama kolom berasal dari whitelist, bukan dari user.
+const updateCourt = (id, data) =>
+  run("UPDATE courts SET ?, updatedAt = NOW() WHERE id = ?", [data, id]);
 
 const storage = multer.diskStorage({
   destination: path.join(__dirname, "..", "uploads"),
@@ -27,25 +86,32 @@ const upload = multer({
 // @route   GET /api/courts   (publik - hanya lapangan aktif, kecuali admin minta semua)
 router.get("/", async (req, res) => {
   try {
-    const filter = req.query.all === "true" ? {} : { isActive: true };
+    const where = [];
+    const params = [];
+    if (req.query.all !== "true") where.push("isActive = 1");
     if (req.query.sportType) {
-      filter.sportType = req.query.sportType;
+      where.push("sportType = ?");
+      params.push(req.query.sportType);
     }
-    const courts = await Court.find(filter).sort({ createdAt: -1 });
-    res.json(courts);
+    const sql =
+      "SELECT * FROM courts" +
+      (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+      " ORDER BY createdAt DESC";
+    const rows = await query(sql, params);
+    res.json(rows.map(formatCourt));
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengambil data lapangan", error: err.message });
+    sendError(res, err, "Gagal mengambil data lapangan");
   }
 });
 
 // @route   GET /api/courts/:id
 router.get("/:id", async (req, res) => {
   try {
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
     res.json(court);
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengambil data lapangan", error: err.message });
+    sendError(res, err, "Gagal mengambil data lapangan");
   }
 });
 
@@ -54,15 +120,23 @@ router.get("/:id", async (req, res) => {
 router.get("/:id/availability", async (req, res) => {
   try {
     const { date } = req.query;
-    if (!date) return res.status(400).json({ message: "Parameter date wajib diisi" });
+    if (!date) throw new HttpError(400, "Parameter date wajib diisi");
 
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    const closedEntry = (court.closedDates || []).find((c) => c.date === date);
+    const courtInfo = {
+      _id: court.id,
+      id: court.id,
+      name: court.name,
+      pricePerHour: court.pricePerHour,
+      sportType: court.sportType,
+    };
+
+    const closedEntry = court.closedDates.find((c) => c.date === date);
     if (closedEntry) {
       return res.json({
-        court: { _id: court._id, name: court.name, pricePerHour: court.pricePerHour, sportType: court.sportType },
+        court: courtInfo,
         date,
         closed: true,
         closedReason: closedEntry.reason || "",
@@ -71,18 +145,17 @@ router.get("/:id/availability", async (req, res) => {
     }
 
     // Booking yang masih "menahan" slot: belum expired & bukan cancel/reject
-    const activeBookings = await Booking.find({
-      court: court._id,
-      date,
-      status: { $in: ["pending_payment", "waiting_approval", "confirmed"] },
-    }).select("slots status expiresAt");
+    const activeBookings = await query(
+      "SELECT slots, status, expiresAt FROM bookings WHERE courtId = ? AND `date` = ? AND status IN (?)",
+      [court.id, date, ACTIVE_STATUSES]
+    );
 
     const now = new Date();
     const bookedSlots = new Set();
     activeBookings.forEach((b) => {
-      // Abaikan pending_payment yang sudah lewat waktu (akan dibersihkan oleh job, tapi jaga-jaga)
+      // Abaikan pending_payment yang sudah lewat waktu (dibersihkan oleh job, tapi jaga-jaga)
       if (b.status === "pending_payment" && b.expiresAt && b.expiresAt < now) return;
-      b.slots.forEach((s) => bookedSlots.add(s));
+      parseJson(b.slots, []).forEach((s) => bookedSlots.add(s));
     });
 
     const slots = [];
@@ -94,100 +167,112 @@ router.get("/:id/availability", async (req, res) => {
       });
     }
 
-    res.json({ court: { _id: court._id, name: court.name, pricePerHour: court.pricePerHour, sportType: court.sportType }, date, slots });
+    res.json({ court: courtInfo, date, slots });
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengambil ketersediaan", error: err.message });
+    sendError(res, err, "Gagal mengambil ketersediaan");
   }
 });
 
 // @route   POST /api/courts   (admin)
 router.post("/", protect, adminOnly, async (req, res) => {
   try {
-    const court = await Court.create(req.body);
-    res.status(201).json(court);
+    const data = buildCourtData(req.body, { partial: false });
+    const result = await run("INSERT INTO courts SET ?", [data]);
+    res.status(201).json(await getCourt(result.insertId));
   } catch (err) {
-    res.status(500).json({ message: "Gagal menambah lapangan", error: err.message });
+    sendError(res, err, "Gagal menambah lapangan");
   }
 });
 
 // @route   PUT /api/courts/:id   (admin)
 router.put("/:id", protect, adminOnly, async (req, res) => {
   try {
-    const court = await Court.findByIdAndUpdate(req.params.id, req.body, {
-      new: true,
-      runValidators: true,
-    });
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
-    res.json(court);
+    const existing = await getCourt(req.params.id);
+    if (!existing) throw new HttpError(404, "Lapangan tidak ditemukan");
+
+    const data = buildCourtData(req.body, { partial: true });
+    if (Object.keys(data).length === 0) return res.json(existing);
+
+    await updateCourt(existing.id, data);
+    res.json(await getCourt(existing.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengubah lapangan", error: err.message });
+    sendError(res, err, "Gagal mengubah lapangan");
   }
 });
 
 // @route   DELETE /api/courts/:id   (admin)
 router.delete("/:id", protect, adminOnly, async (req, res) => {
   try {
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    const activeBooking = await Booking.findOne({
-      court: court._id,
-      status: { $in: ["pending_payment", "waiting_approval", "confirmed"] },
-    });
+    const activeBooking = await queryOne(
+      "SELECT id FROM bookings WHERE courtId = ? AND status IN (?) LIMIT 1",
+      [court.id, ACTIVE_STATUSES]
+    );
     if (activeBooking) {
-      return res.status(400).json({
-        message: "Tidak bisa menghapus lapangan yang masih memiliki booking aktif. Nonaktifkan saja.",
-      });
+      throw new HttpError(
+        400,
+        "Tidak bisa menghapus lapangan yang masih memiliki booking aktif. Nonaktifkan saja."
+      );
     }
 
-    await court.deleteOne();
+    try {
+      await run("DELETE FROM courts WHERE id = ?", [court.id]);
+    } catch (e) {
+      // Lapangan yang punya riwayat booking (selesai/batal) dilindungi foreign key
+      if (e.errno === 1451) {
+        throw new HttpError(
+          400,
+          "Lapangan ini memiliki riwayat booking dan tidak bisa dihapus. Nonaktifkan saja."
+        );
+      }
+      throw e;
+    }
     res.json({ message: "Lapangan berhasil dihapus" });
   } catch (err) {
-    res.status(500).json({ message: "Gagal menghapus lapangan", error: err.message });
+    sendError(res, err, "Gagal menghapus lapangan");
   }
 });
 
 // @route   POST /api/courts/:id/thumbnail   (admin - upload foto thumbnail)
 router.post("/:id/thumbnail", protect, adminOnly, upload.single("image"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ message: "Tidak ada file yang dikirim" });
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    if (!req.file) throw new HttpError(400, "Tidak ada file yang dikirim");
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    court.image = `/uploads/${req.file.filename}`;
-    await court.save();
-    res.json(court);
+    await updateCourt(court.id, { image: `/uploads/${req.file.filename}` });
+    res.json(await getCourt(court.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal upload thumbnail", error: err.message });
+    sendError(res, err, "Gagal upload thumbnail");
   }
 });
 
 // @route   DELETE /api/courts/:id/thumbnail   (admin - hapus foto thumbnail)
 router.delete("/:id/thumbnail", protect, adminOnly, async (req, res) => {
   try {
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    court.image = "";
-    await court.save();
-    res.json(court);
+    await updateCourt(court.id, { image: "" });
+    res.json(await getCourt(court.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal menghapus thumbnail", error: err.message });
+    sendError(res, err, "Gagal menghapus thumbnail");
   }
 });
 
 // @route   POST /api/courts/:id/images   (admin - upload gambar gallery)
 router.post("/:id/images", protect, adminOnly, upload.array("images", 10), async (req, res) => {
   try {
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    const newImages = req.files.map((f) => `/uploads/${f.filename}`);
-    court.images = [...(court.images || []), ...newImages];
-    await court.save();
-    res.json(court);
+    const newImages = (req.files || []).map((f) => `/uploads/${f.filename}`);
+    await updateCourt(court.id, { images: JSON.stringify([...court.images, ...newImages]) });
+    res.json(await getCourt(court.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal upload gambar", error: err.message });
+    sendError(res, err, "Gagal upload gambar");
   }
 });
 
@@ -195,14 +280,14 @@ router.post("/:id/images", protect, adminOnly, upload.array("images", 10), async
 router.delete("/:id/images", protect, adminOnly, async (req, res) => {
   try {
     const { imageUrl } = req.body;
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    court.images = (court.images || []).filter((img) => img !== imageUrl);
-    await court.save();
-    res.json(court);
+    const remaining = court.images.filter((img) => img !== imageUrl);
+    await updateCourt(court.id, { images: JSON.stringify(remaining) });
+    res.json(await getCourt(court.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal menghapus gambar", error: err.message });
+    sendError(res, err, "Gagal menghapus gambar");
   }
 });
 
@@ -210,19 +295,20 @@ router.delete("/:id/images", protect, adminOnly, async (req, res) => {
 router.post("/:id/closed-dates", protect, adminOnly, async (req, res) => {
   try {
     const { date, reason } = req.body;
-    if (!date) return res.status(400).json({ message: "Parameter date wajib diisi" });
+    if (!date) throw new HttpError(400, "Parameter date wajib diisi");
 
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    const exists = (court.closedDates || []).some((c) => c.date === date);
-    if (exists) return res.status(400).json({ message: "Tanggal sudah ada dalam jadwal libur" });
+    if (court.closedDates.some((c) => c.date === date)) {
+      throw new HttpError(400, "Tanggal sudah ada dalam jadwal libur");
+    }
 
-    court.closedDates.push({ date, reason: reason || "" });
-    await court.save();
-    res.json(court);
+    const updated = [...court.closedDates, { date, reason: reason || "" }];
+    await updateCourt(court.id, { closedDates: JSON.stringify(updated) });
+    res.json(await getCourt(court.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal menambah jadwal libur", error: err.message });
+    sendError(res, err, "Gagal menambah jadwal libur");
   }
 });
 
@@ -230,14 +316,14 @@ router.post("/:id/closed-dates", protect, adminOnly, async (req, res) => {
 router.delete("/:id/closed-dates", protect, adminOnly, async (req, res) => {
   try {
     const { date } = req.body;
-    const court = await Court.findById(req.params.id);
-    if (!court) return res.status(404).json({ message: "Lapangan tidak ditemukan" });
+    const court = await getCourt(req.params.id);
+    if (!court) throw new HttpError(404, "Lapangan tidak ditemukan");
 
-    court.closedDates = (court.closedDates || []).filter((c) => c.date !== date);
-    await court.save();
-    res.json(court);
+    const remaining = court.closedDates.filter((c) => c.date !== date);
+    await updateCourt(court.id, { closedDates: JSON.stringify(remaining) });
+    res.json(await getCourt(court.id));
   } catch (err) {
-    res.status(500).json({ message: "Gagal menghapus jadwal libur", error: err.message });
+    sendError(res, err, "Gagal menghapus jadwal libur");
   }
 });
 

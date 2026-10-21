@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
-const User = require("../models/User");
+const { queryOne } = require("../config/db");
+const { formatUser } = require("../utils/serialize");
 
 const protect = async (req, res, next) => {
   try {
@@ -14,11 +15,12 @@ const protect = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id);
+    const row = await queryOne("SELECT * FROM users WHERE id = ?", [decoded.id]);
 
-    if (!user) {
+    if (!row) {
       return res.status(401).json({ message: "User tidak ditemukan" });
     }
+    const user = formatUser(row); // tanpa password, isActive jadi boolean
     if (!user.isActive) {
       return res.status(403).json({ message: "Akun anda dinonaktifkan" });
     }

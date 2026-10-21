@@ -1,81 +1,95 @@
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const passport = require("passport");
-const User = require("../models/User");
+const { queryOne, run } = require("../config/db");
+const { formatUser } = require("../utils/serialize");
+const { HttpError, sendError } = require("../utils/httpError");
 const generateToken = require("../utils/generateToken");
 const { protect } = require("../middleware/auth");
 
 const router = express.Router();
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 // @route   POST /api/auth/register
 router.post("/register", async (req, res) => {
   try {
-    const { name, email, password, phone } = req.body;
+    const { name, password, phone } = req.body;
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
 
     if (!name || !email || !password) {
-      return res.status(400).json({ message: "Nama, email, dan password wajib diisi" });
+      throw new HttpError(400, "Nama, email, dan password wajib diisi");
     }
-    if (password.length < 6) {
-      return res.status(400).json({ message: "Password minimal 6 karakter" });
+    if (!EMAIL_RE.test(email)) throw new HttpError(400, "Format email tidak valid");
+    if (password.length < 6) throw new HttpError(400, "Password minimal 6 karakter");
+
+    const existing = await queryOne("SELECT id FROM users WHERE email = ?", [email]);
+    if (existing) throw new HttpError(400, "Email sudah terdaftar");
+
+    const hash = await bcrypt.hash(password, 10);
+    let result;
+    try {
+      result = await run(
+        "INSERT INTO users (name, email, password, phone) VALUES (?, ?, ?, ?)",
+        [String(name).trim(), email, hash, phone || null]
+      );
+    } catch (e) {
+      if (e.code === "ER_DUP_ENTRY") throw new HttpError(400, "Email sudah terdaftar");
+      throw e;
     }
 
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
-    if (existingUser) {
-      return res.status(400).json({ message: "Email sudah terdaftar" });
-    }
-
-    const user = await User.create({ name, email, password, phone });
-
+    const user = formatUser(await queryOne("SELECT * FROM users WHERE id = ?", [result.insertId]));
     res.status(201).json({
-      _id: user._id,
+      _id: user.id,
+      id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,
-      token: generateToken(user._id),
+      token: generateToken(user.id),
     });
   } catch (err) {
-    res.status(500).json({ message: "Gagal mendaftar", error: err.message });
+    sendError(res, err, "Gagal mendaftar");
   }
 });
 
 // @route   POST /api/auth/login
 router.post("/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email: email?.toLowerCase() }).select("+password");
+    const { password } = req.body;
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    if (!email || !password) throw new HttpError(400, "Email dan password wajib diisi");
 
-    if (!user) {
-      return res.status(401).json({ message: "Email atau password salah" });
+    const row = await queryOne("SELECT * FROM users WHERE email = ?", [email]);
+    if (!row) throw new HttpError(401, "Email atau password salah");
+
+    if (!row.password) {
+      throw new HttpError(400, "Akun ini terdaftar melalui Google. Silakan login dengan Google.");
     }
-    if (!user.password) {
-      return res.status(400).json({
-        message: "Akun ini terdaftar melalui Google. Silakan login dengan Google.",
-      });
-    }
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(401).json({ message: "Email atau password salah" });
-    }
-    if (!user.isActive) {
-      return res.status(403).json({ message: "Akun anda dinonaktifkan" });
-    }
+    const isMatch = await bcrypt.compare(password, row.password);
+    if (!isMatch) throw new HttpError(401, "Email atau password salah");
+
+    const user = formatUser(row);
+    if (!user.isActive) throw new HttpError(403, "Akun anda dinonaktifkan");
 
     res.json({
-      _id: user._id,
+      _id: user.id,
+      id: user.id,
       name: user.name,
       email: user.email,
       role: user.role,
       avatar: user.avatar,
-      token: generateToken(user._id),
+      token: generateToken(user.id),
     });
   } catch (err) {
-    res.status(500).json({ message: "Gagal login", error: err.message });
+    sendError(res, err, "Gagal login");
   }
 });
 
 // @route   GET /api/auth/me
 router.get("/me", protect, async (req, res) => {
   res.json({
-    _id: req.user._id,
+    _id: req.user.id,
+    id: req.user.id,
     name: req.user.name,
     email: req.user.email,
     role: req.user.role,
@@ -98,7 +112,7 @@ router.get(
     failureRedirect: `${process.env.CLIENT_URL}/login?error=google_failed`,
   }),
   (req, res) => {
-    const token = generateToken(req.user._id);
+    const token = generateToken(req.user.id);
     // Redirect kembali ke client sambil membawa token
     res.redirect(`${process.env.CLIENT_URL}/oauth-success?token=${token}`);
   }

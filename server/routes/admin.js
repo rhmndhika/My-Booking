@@ -1,119 +1,130 @@
 const express = require("express");
-const Booking = require("../models/Booking");
-const Court = require("../models/Court");
-const User = require("../models/User");
+const { query, queryOne, run } = require("../config/db");
+const {
+  formatUser,
+  formatBooking,
+  formatBookingJoined,
+  selectCols,
+  USER_COLUMNS_SAFE,
+} = require("../utils/serialize");
+const { HttpError, sendError } = require("../utils/httpError");
 const { protect, adminOnly } = require("../middleware/auth");
 
 const router = express.Router();
 
 router.use(protect, adminOnly);
 
+const count = async (sql, params = []) => Number((await queryOne(sql, params)).n);
+
 // @route   GET /api/admin/bookings   (semua booking, dengan filter)
 router.get("/bookings", async (req, res) => {
   try {
     const { status, court, date, q } = req.query;
-    const filter = {};
-    if (status) filter.status = status;
-    if (court) filter.court = court;
-    if (date) filter.date = date;
-
-    let query = Booking.find(filter)
-      .populate("user", "name email phone")
-      .populate("court", "name location")
-      .sort({ createdAt: -1 });
-
-    let bookings = await query;
-
+    const where = [];
+    const params = [];
+    if (status) { where.push("b.status = ?"); params.push(status); }
+    if (court) { where.push("b.courtId = ?"); params.push(court); }
+    if (date) { where.push("b.`date` = ?"); params.push(date); }
     if (q) {
-      const search = q.toLowerCase();
-      bookings = bookings.filter(
-        (b) =>
-          b.user?.name?.toLowerCase().includes(search) ||
-          b.user?.email?.toLowerCase().includes(search) ||
-          b.court?.name?.toLowerCase().includes(search)
-      );
+      where.push("(u.name LIKE ? OR u.email LIKE ? OR c.name LIKE ?)");
+      const like = `%${q}%`;
+      params.push(like, like, like);
     }
 
-    res.json(bookings);
+    const rows = await query(
+      `SELECT b.*,
+              ${selectCols("u", "u_", ["id", "name", "email", "phone"])},
+              ${selectCols("c", "c_", ["id", "name", "location"])}
+       FROM bookings b
+       JOIN users u ON u.id = b.userId
+       JOIN courts c ON c.id = b.courtId
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       ORDER BY b.createdAt DESC`,
+      params
+    );
+    res.json(rows.map(formatBookingJoined));
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengambil data booking", error: err.message });
+    sendError(res, err, "Gagal mengambil data booking");
   }
 });
+
+const getBooking = async (id) => {
+  const booking = await queryOne("SELECT * FROM bookings WHERE id = ?", [id]);
+  if (!booking) throw new HttpError(404, "Booking tidak ditemukan");
+  return booking;
+};
 
 // @route   PUT /api/admin/bookings/:id/approve
 router.put("/bookings/:id/approve", async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
-    if (!booking) return res.status(404).json({ message: "Booking tidak ditemukan" });
+    const booking = await getBooking(req.params.id);
     if (booking.paymentStatus !== "paid") {
-      return res.status(400).json({ message: "Booking belum dibayar, tidak bisa di-approve" });
+      throw new HttpError(400, "Booking belum dibayar, tidak bisa di-approve");
     }
     if (booking.status !== "waiting_approval") {
-      return res.status(400).json({ message: "Status booking tidak dalam menunggu approval" });
+      throw new HttpError(400, "Status booking tidak dalam menunggu approval");
     }
-    booking.status = "confirmed";
-    await booking.save();
-    res.json({ message: "Booking berhasil disetujui", booking });
+    await run("UPDATE bookings SET status = 'confirmed', updatedAt = NOW() WHERE id = ?", [booking.id]);
+    const updated = await queryOne("SELECT * FROM bookings WHERE id = ?", [booking.id]);
+    res.json({ message: "Booking berhasil disetujui", booking: formatBooking(updated) });
   } catch (err) {
-    res.status(500).json({ message: "Gagal menyetujui booking", error: err.message });
+    sendError(res, err, "Gagal menyetujui booking");
   }
 });
 
 // @route   PUT /api/admin/bookings/:id/reject
 router.put("/bookings/:id/reject", async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
-    if (!booking) return res.status(404).json({ message: "Booking tidak ditemukan" });
-    booking.status = "rejected";
-    booking.cancelledBy = "admin";
-    booking.cancelReason = req.body.reason || "Ditolak oleh admin";
-    await booking.save();
-    res.json({ message: "Booking berhasil ditolak", booking });
+    const booking = await getBooking(req.params.id);
+    await run(
+      "UPDATE bookings SET status = 'rejected', cancelledBy = 'admin', cancelReason = ?, updatedAt = NOW() WHERE id = ?",
+      [req.body.reason || "Ditolak oleh admin", booking.id]
+    );
+    const updated = await queryOne("SELECT * FROM bookings WHERE id = ?", [booking.id]);
+    res.json({ message: "Booking berhasil ditolak", booking: formatBooking(updated) });
   } catch (err) {
-    res.status(500).json({ message: "Gagal menolak booking", error: err.message });
+    sendError(res, err, "Gagal menolak booking");
   }
 });
 
 // @route   PUT /api/admin/bookings/:id/cancel  (admin membatalkan kapan saja)
 router.put("/bookings/:id/cancel", async (req, res) => {
   try {
-    const booking = await Booking.findById(req.params.id);
-    if (!booking) return res.status(404).json({ message: "Booking tidak ditemukan" });
+    const booking = await getBooking(req.params.id);
     if (["cancelled", "rejected", "expired"].includes(booking.status)) {
-      return res.status(400).json({ message: "Booking sudah tidak aktif" });
+      throw new HttpError(400, "Booking sudah tidak aktif");
     }
-    booking.status = "cancelled";
-    booking.cancelledBy = "admin";
-    booking.cancelReason = req.body.reason || "Dibatalkan oleh admin";
-    await booking.save();
-    res.json({ message: "Booking berhasil dibatalkan", booking });
+    await run(
+      "UPDATE bookings SET status = 'cancelled', cancelledBy = 'admin', cancelReason = ?, updatedAt = NOW() WHERE id = ?",
+      [req.body.reason || "Dibatalkan oleh admin", booking.id]
+    );
+    const updated = await queryOne("SELECT * FROM bookings WHERE id = ?", [booking.id]);
+    res.json({ message: "Booking berhasil dibatalkan", booking: formatBooking(updated) });
   } catch (err) {
-    res.status(500).json({ message: "Gagal membatalkan booking", error: err.message });
+    sendError(res, err, "Gagal membatalkan booking");
   }
 });
 
 // @route   GET /api/admin/stats   (statistik dashboard)
 router.get("/stats", async (req, res) => {
   try {
-    const [totalCourts, activeCourts, totalUsers, totalBookings, confirmedBookings, waitingApproval, revenueAgg] =
+    const [totalCourts, activeCourts, totalUsers, totalBookings, confirmedBookings, waitingApproval, revenueRow] =
       await Promise.all([
-        Court.countDocuments(),
-        Court.countDocuments({ isActive: true }),
-        User.countDocuments({ role: "user" }),
-        Booking.countDocuments(),
-        Booking.countDocuments({ status: "confirmed" }),
-        Booking.countDocuments({ status: "waiting_approval" }),
-        Booking.aggregate([
-          { $match: { paymentStatus: "paid" } },
-          { $group: { _id: null, total: { $sum: "$totalPrice" } } },
-        ]),
+        count("SELECT COUNT(*) AS n FROM courts"),
+        count("SELECT COUNT(*) AS n FROM courts WHERE isActive = 1"),
+        count("SELECT COUNT(*) AS n FROM users WHERE role = 'user'"),
+        count("SELECT COUNT(*) AS n FROM bookings"),
+        count("SELECT COUNT(*) AS n FROM bookings WHERE status = 'confirmed'"),
+        count("SELECT COUNT(*) AS n FROM bookings WHERE status = 'waiting_approval'"),
+        queryOne("SELECT COALESCE(SUM(totalPrice), 0) AS total FROM bookings WHERE paymentStatus = 'paid'"),
       ]);
 
-    // Statistik booking per hari (7 hari terakhir) untuk grafik
+    // Booking 7 hari terakhir untuk grafik
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const recentBookings = await Booking.find({ createdAt: { $gte: sevenDaysAgo } }).select(
-      "createdAt totalPrice paymentStatus"
+    const recent = await query(
+      "SELECT id, createdAt, totalPrice, paymentStatus FROM bookings WHERE createdAt >= ?",
+      [sevenDaysAgo]
     );
 
     res.json({
@@ -123,34 +134,40 @@ router.get("/stats", async (req, res) => {
       totalBookings,
       confirmedBookings,
       waitingApproval,
-      totalRevenue: revenueAgg[0]?.total || 0,
-      recentBookings,
+      totalRevenue: Number(revenueRow.total) || 0,
+      recentBookings: recent.map((r) => ({ ...r, _id: r.id })),
     });
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengambil statistik", error: err.message });
+    sendError(res, err, "Gagal mengambil statistik");
   }
 });
 
 // @route   GET /api/admin/users
 router.get("/users", async (req, res) => {
   try {
-    const users = await User.find().select("-password").sort({ createdAt: -1 });
-    res.json(users);
+    const rows = await query(
+      `SELECT ${USER_COLUMNS_SAFE.join(", ")} FROM users ORDER BY createdAt DESC`
+    );
+    res.json(rows.map(formatUser));
   } catch (err) {
-    res.status(500).json({ message: "Gagal mengambil data user", error: err.message });
+    sendError(res, err, "Gagal mengambil data user");
   }
 });
+
+const getUser = async (id) => {
+  const user = await queryOne(`SELECT ${USER_COLUMNS_SAFE.join(", ")} FROM users WHERE id = ?`, [id]);
+  if (!user) throw new HttpError(404, "User tidak ditemukan");
+  return user;
+};
 
 // @route   PUT /api/admin/users/:id/toggle-active   (blokir / aktifkan user)
 router.put("/users/:id/toggle-active", async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
-    if (!user) return res.status(404).json({ message: "User tidak ditemukan" });
-    user.isActive = !user.isActive;
-    await user.save();
-    res.json({ message: "Status user diperbarui", user });
+    const user = await getUser(req.params.id);
+    await run("UPDATE users SET isActive = NOT isActive, updatedAt = NOW() WHERE id = ?", [user.id]);
+    res.json({ message: "Status user diperbarui", user: formatUser(await getUser(user.id)) });
   } catch (err) {
-    res.status(500).json({ message: "Gagal memperbarui user", error: err.message });
+    sendError(res, err, "Gagal memperbarui user");
   }
 });
 
@@ -158,15 +175,13 @@ router.put("/users/:id/toggle-active", async (req, res) => {
 router.put("/users/:id/role", async (req, res) => {
   try {
     const { role } = req.body;
-    if (!["user", "admin"].includes(role)) {
-      return res.status(400).json({ message: "Role tidak valid" });
-    }
-    const user = await User.findByIdAndUpdate(req.params.id, { role }, { new: true }).select(
-      "-password"
-    );
-    res.json({ message: "Role user diperbarui", user });
+    if (!["user", "admin"].includes(role)) throw new HttpError(400, "Role tidak valid");
+
+    const user = await getUser(req.params.id);
+    await run("UPDATE users SET role = ?, updatedAt = NOW() WHERE id = ?", [role, user.id]);
+    res.json({ message: "Role user diperbarui", user: formatUser(await getUser(user.id)) });
   } catch (err) {
-    res.status(500).json({ message: "Gagal memperbarui role", error: err.message });
+    sendError(res, err, "Gagal memperbarui role");
   }
 });
 
