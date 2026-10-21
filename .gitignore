@@ -6,3 +6,4 @@ dist/
 server/uploads/
 server/config/schema.js
 server/config/seed.js
+docker-compose.yml
